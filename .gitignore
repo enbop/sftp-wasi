@@ -1,0 +1,13 @@
+/target/
+
+# Runtime mount used by local SFTP/Wasmtime compatibility tests.
+/data/*
+!/data/
+!/data/.gitignore
+
+# OS/editor noise.
+.DS_Store
+._*
+*.swp
+*.swo
+*~

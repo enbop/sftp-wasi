@@ -1,0 +1,24 @@
+[package]
+name = "sftp-wasip2-experiment"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+env_logger = "0.11"
+log = "0.4"
+rand = { version = "0.10", features = ["thread_rng"] }
+russh = { path = "../russh/russh", default-features = false, features = [
+    "ring",
+] }
+russh-sftp = { path = "../russh-sftp" }
+tokio = { version = "1.51.0", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt",
+    "sync",
+    "time",
+] }
