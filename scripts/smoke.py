@@ -33,7 +33,7 @@ def main():
         passes.append(label)
         print('PASS', label, flush=True)
 
-    with tempfile.TemporaryDirectory(prefix='sftp-wasip2-smoke-') as temp_name, contextlib.ExitStack() as cleanup:
+    with tempfile.TemporaryDirectory(prefix='sftp-wasi-smoke-') as temp_name, contextlib.ExitStack() as cleanup:
         temp = Path(temp_name)
         data, state, mount = (temp / name for name in ('data', 'state', 'mount'))
         for path in (data, state, mount):

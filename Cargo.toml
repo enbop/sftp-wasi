@@ -1,5 +1,5 @@
 [package]
-name = "sftp-wasip2-experiment"
+name = "sftp-wasi"
 version = "0.1.0"
 edition = "2024"
 
@@ -10,10 +10,10 @@ anyhow = "1"
 env_logger = "0.11"
 log = "0.4"
 rand = { version = "0.10", features = ["thread_rng"] }
-russh = { path = "../russh/russh", default-features = false, features = [
+russh = { git = "https://github.com/enbop/russh.git", rev = "e99d6fc8ce41c7b22082b357cd411c2089c22d0b", default-features = false, features = [
     "ring",
 ] }
-russh-sftp = { path = "../russh-sftp" }
+russh-sftp = { git = "https://github.com/AspectUnk/russh-sftp.git", rev = "c2590f9a41cf99c2fb3c672e045a9837a8adcb35" }
 tokio = { version = "1.51.0", features = [
     "io-util",
     "macros",

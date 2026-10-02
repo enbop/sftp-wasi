@@ -16,7 +16,7 @@ class FungiService:
         self.name = 'sftp-recipe-test'
         self.proc = None
         self.service_id = None
-        self.manifest = temp / 'sftp-wasip2.fungi.md'
+        self.manifest = temp / 'sftp-wasi.fungi.md'
         text = recipe.read_text()
         sources = re.findall(r'^    file: (.+)$', text, flags=re.MULTILINE)
         assert len(sources) == 1, 'expected one local recipe source'

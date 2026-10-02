@@ -1,11 +1,11 @@
 ---
 fungi: service/v1
-id: sftp-wasip2
+id: sftp-wasi
 
 run:
   provider: wasmtime
   source:
-    file: ./target/wasm32-wasip2/release/sftp-wasip2-experiment.wasm
+    file: ./target/wasm32-wasip2/release/sftp-wasi.wasm
   env:
     SFTP_BIND_HOST: 127.0.0.1
     SFTP_PORT: "2222"
@@ -23,7 +23,7 @@ publish:
       kind: ssh
 ---
 
-# SFTP WASIp2 experiment
+# SFTP WASI
 
 Local-build recipe for Fungi's run-only Wasmtime provider (merged PR #79).
 Tested on core commit 12f5aca0e7b71b27bced9d066ffe4d484dfd38f3; see VALIDATION.md.
@@ -32,8 +32,8 @@ is relative to this recipe, so apply it from any working directory.
 
 ```bash
 cargo build --locked --release --target wasm32-wasip2
-fungi service apply sftp-demo ./sftp-wasip2.fungi.md --dry-run
-fungi service apply sftp-demo ./sftp-wasip2.fungi.md --start
+fungi service apply sftp-demo ./sftp-wasi.fungi.md --dry-run
+fungi service apply sftp-demo ./sftp-wasi.fungi.md --start
 fungi service inspect sftp-demo --verbose
 fungi service connect sftp-demo sftp
 ```
@@ -53,5 +53,5 @@ Back up files before removing the service; this recipe does not define backup
 or retention behavior.
 
 This is a local recipe, not a published catalog entry: use the file path,
-not `--recipe sftp-wasip2`. Release artifact publication and a catalog entry
+not `--recipe sftp-wasi`. Release artifact publication and a catalog entry
 can follow when the experiment is ready to distribute.
