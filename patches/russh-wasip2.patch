@@ -1,0 +1,160 @@
+diff --git a/russh-util/Cargo.toml b/russh-util/Cargo.toml
+index da6c116..31e798f 100644
+--- a/russh-util/Cargo.toml
++++ b/russh-util/Cargo.toml
+@@ -12,10 +12,13 @@ repository = "https://github.com/warp-tech/russh"
+ [dependencies]
+ tokio = { workspace = true, features = ["sync", "macros"] }
+ 
+-[target.'cfg(target_arch = "wasm32")'.dependencies]
++[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
+ chrono = "0.4.38"
+ wasm-bindgen = "0.2"
+ wasm-bindgen-futures = "0.4.43"
+ 
+ [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "rt"] }
++
++[target.'cfg(target_os = "wasi")'.dependencies]
++tokio = { workspace = true, features = ["io-util", "rt"] }
+diff --git a/russh-util/src/runtime.rs b/russh-util/src/runtime.rs
+index ad6d280..ecee5b7 100644
+--- a/russh-util/src/runtime.rs
++++ b/russh-util/src/runtime.rs
+@@ -20,14 +20,14 @@ where
+     handle: tokio::sync::oneshot::Receiver<T>,
+ }
+ 
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ macro_rules! spawn_impl {
+     ($fn:expr) => {
+         wasm_bindgen_futures::spawn_local($fn)
+     };
+ }
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+ macro_rules! spawn_impl {
+     ($fn:expr) => {
+         tokio::spawn($fn)
+diff --git a/russh-util/src/time.rs b/russh-util/src/time.rs
+index a5e1adc..7f256cf 100644
+--- a/russh-util/src/time.rs
++++ b/russh-util/src/time.rs
+@@ -1,10 +1,10 @@
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+ pub use std::time::Instant;
+ 
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ pub use wasm::Instant;
+ 
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ mod wasm {
+     #[derive(Debug, Clone, Copy)]
+     pub struct Instant {
+diff --git a/russh/Cargo.toml b/russh/Cargo.toml
+index cb76c91..dc667dd 100644
+--- a/russh/Cargo.toml
++++ b/russh/Cargo.toml
+@@ -108,6 +108,13 @@ tokio = { workspace = true, features = [
+   "net",
+ ] }
+ 
++[target.'cfg(target_os = "wasi")'.dependencies]
++tokio = { workspace = true, features = [
++  "io-util",
++  "time",
++  "net",
++] }
++
+ [target.'cfg(windows)'.dependencies]
+ pageant = { version = "0.2", path = "../pageant" }
+ 
+diff --git a/russh/src/cert.rs b/russh/src/cert.rs
+index 2a10104..4fa4fe1 100644
+--- a/russh/src/cert.rs
++++ b/russh/src/cert.rs
+@@ -1,8 +1,8 @@
+ use ssh_key::{Certificate, HashAlg, PublicKey};
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+ use {
+-    crate::helpers::AlgorithmExt, ssh_encoding::Decode, ssh_key::Algorithm,
+-    ssh_key::public::KeyData,
++    crate::helpers::AlgorithmExt, ssh_encoding::Decode, ssh_key::public::KeyData,
++    ssh_key::Algorithm,
+ };
+ 
+ use crate::keys::key::PrivateKeyWithHashAlg;
+@@ -27,7 +27,7 @@ impl From<&PrivateKeyWithHashAlg> for PublicKeyOrCertificate {
+ }
+ 
+ impl PublicKeyOrCertificate {
+-    #[cfg(not(target_arch = "wasm32"))]
++    #[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+     pub fn decode(pubkey_algo: &str, buf: &[u8]) -> Result<Self, ssh_key::Error> {
+         let mut reader = buf;
+         match Algorithm::new_certificate_ext(pubkey_algo) {
+diff --git a/russh/src/lib_inner.rs b/russh/src/lib_inner.rs
+index 81370d0..e0b9d1f 100644
+--- a/russh/src/lib_inner.rs
++++ b/russh/src/lib_inner.rs
+@@ -64,7 +64,7 @@ mod parsing;
+ mod session;
+ 
+ /// Server side of this library.
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+ pub mod server;
+ 
+ /// Client side of this library.
+diff --git a/russh/src/msg.rs b/russh/src/msg.rs
+index 9ad4051..dca9e88 100644
+--- a/russh/src/msg.rs
++++ b/russh/src/msg.rs
+@@ -14,7 +14,7 @@
+ //
+ // https://tools.ietf.org/html/rfc4253#section-12
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+ pub use server::*;
+ 
+ use crate::{strict_kex_violation, Error};
+@@ -81,7 +81,7 @@ pub const SSH_OPEN_UNKNOWN_CHANNEL_TYPE: u8 = 3;
+ #[allow(dead_code)]
+ pub const SSH_OPEN_RESOURCE_SHORTAGE: u8 = 4;
+ 
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+ mod server {
+     // https://tools.ietf.org/html/rfc4256#section-5
+     pub const USERAUTH_INFO_REQUEST: u8 = 60;
+diff --git a/russh/src/negotiation.rs b/russh/src/negotiation.rs
+index 6ef741f..c854d9d 100644
+--- a/russh/src/negotiation.rs
++++ b/russh/src/negotiation.rs
+@@ -22,15 +22,15 @@ use ssh_key::{Algorithm, EcdsaCurve, HashAlg, PrivateKey};
+ use crate::cipher::CIPHERS;
+ use crate::helpers::NameList;
+ use crate::kex::{
+-    EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT, EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER, KexCause,
++    KexCause, EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT, EXTENSION_OPENSSH_STRICT_KEX_AS_SERVER,
+ };
+ use crate::keys::key::safe_rng;
+-#[cfg(not(target_arch = "wasm32"))]
++#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
+ use crate::server::Config;
+ use crate::sshbuffer::PacketWriter;
+-use crate::{AlgorithmKind, Error, cipher, compression, kex, mac, msg};
++use crate::{cipher, compression, kex, mac, msg, AlgorithmKind, Error};
+ 
+-#[cfg(target_arch = "wasm32")]
++#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
+ /// WASM-only stub
+ pub struct Config {
+     keys: Vec<PrivateKey>,

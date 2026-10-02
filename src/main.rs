@@ -102,7 +102,19 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // OpenSSH scp checks the remote SSH process status after SFTP completes.
+        session.exit_status_request(channel, 0)?;
         session.close(channel)?;
+        self.take_channel(channel).await;
+        Ok(())
+    }
+
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.take_channel(channel).await;
         Ok(())
     }
 
@@ -145,7 +157,7 @@ enum HandleEntry {
 }
 
 struct FileHandle {
-    path: PathBuf,
+    file: fs::File,
     can_read: bool,
     can_write: bool,
 }
@@ -180,7 +192,10 @@ impl FsSftpSession {
             match component {
                 Component::RootDir | Component::CurDir => {}
                 Component::Normal(part) => normalized.push(part.to_string_lossy().into_owned()),
-                Component::ParentDir => return Err(StatusCode::PermissionDenied),
+                Component::ParentDir => {
+                    // SFTP paths use a virtual root; /.. stays at that root.
+                    normalized.pop();
+                }
                 Component::Prefix(_) => return Err(StatusCode::PermissionDenied),
             }
         }
@@ -204,11 +219,18 @@ impl FsSftpSession {
     fn attrs_from_metadata(&self, metadata: &fs::Metadata) -> FileAttributes {
         let mut attrs = FileAttributes::empty();
         attrs.size = Some(metadata.len());
-        attrs.permissions = Some(if metadata.permissions().readonly() {
-            0o555
-        } else {
-            0o777
-        });
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            attrs.permissions = Some(metadata.permissions().mode());
+        }
+        // WASIp2 exposes access capabilities, not POSIX permission bits.
+        #[cfg(not(unix))]
+        {
+            // WASI's readonly flag is not a POSIX mode; using it here can
+            // cause scp -p to make downloaded files unexpectedly read-only.
+            attrs.permissions = Some(if metadata.is_dir() { 0o755 } else { 0o644 });
+        }
         attrs.atime = Some(system_time_to_secs(
             metadata.accessed().unwrap_or(UNIX_EPOCH),
         ));
@@ -266,18 +288,17 @@ impl russh_sftp::server::Handler for FsSftpSession {
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
         let path = self.resolve_path(&filename)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(map_io_error)?;
-        }
-
         let options: fs::OpenOptions = pflags.into();
-        options.open(&path).map_err(map_io_error)?;
+        let file = options.open(&path).map_err(map_io_error)?;
+        if file.metadata().map_err(map_io_error)?.is_dir() {
+            return Err(StatusCode::Failure);
+        }
 
         let handle = self.alloc_handle("file");
         self.handles.insert(
             handle.clone(),
             HandleEntry::File(FileHandle {
-                path,
+                file,
                 can_read: pflags.contains(OpenFlags::READ),
                 can_write: pflags.contains(OpenFlags::WRITE) || pflags.contains(OpenFlags::APPEND),
             }),
@@ -298,7 +319,10 @@ impl russh_sftp::server::Handler for FsSftpSession {
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
-        let entry = self.handles.get(&handle).ok_or(StatusCode::NoSuchFile)?;
+        let entry = self
+            .handles
+            .get_mut(&handle)
+            .ok_or(StatusCode::NoSuchFile)?;
         let file = match entry {
             HandleEntry::File(file) => file,
             HandleEntry::Dir(_) => return Err(StatusCode::BadMessage),
@@ -308,14 +332,12 @@ impl russh_sftp::server::Handler for FsSftpSession {
             return Err(StatusCode::PermissionDenied);
         }
 
-        let mut opened = fs::OpenOptions::new()
-            .read(true)
-            .open(&file.path)
+        file.file
+            .seek(SeekFrom::Start(offset))
             .map_err(map_io_error)?;
-        opened.seek(SeekFrom::Start(offset)).map_err(map_io_error)?;
 
         let mut buffer = vec![0; len as usize];
-        let bytes_read = opened.read(&mut buffer).map_err(map_io_error)?;
+        let bytes_read = file.file.read(&mut buffer).map_err(map_io_error)?;
         if bytes_read == 0 {
             return Err(StatusCode::Eof);
         }
@@ -331,7 +353,10 @@ impl russh_sftp::server::Handler for FsSftpSession {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
-        let entry = self.handles.get(&handle).ok_or(StatusCode::NoSuchFile)?;
+        let entry = self
+            .handles
+            .get_mut(&handle)
+            .ok_or(StatusCode::NoSuchFile)?;
         let file = match entry {
             HandleEntry::File(file) => file,
             HandleEntry::Dir(_) => return Err(StatusCode::BadMessage),
@@ -341,13 +366,11 @@ impl russh_sftp::server::Handler for FsSftpSession {
             return Err(StatusCode::PermissionDenied);
         }
 
-        let mut opened = fs::OpenOptions::new()
-            .write(true)
-            .open(&file.path)
+        file.file
+            .seek(SeekFrom::Start(offset))
             .map_err(map_io_error)?;
-        opened.seek(SeekFrom::Start(offset)).map_err(map_io_error)?;
-        opened.write_all(&data).map_err(map_io_error)?;
-        opened.flush().map_err(map_io_error)?;
+        file.file.write_all(&data).map_err(map_io_error)?;
+        file.file.flush().map_err(map_io_error)?;
 
         Ok(self.status(id, StatusCode::Ok))
     }
@@ -362,11 +385,11 @@ impl russh_sftp::server::Handler for FsSftpSession {
     }
 
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
-        let path = match self.handles.get(&handle).ok_or(StatusCode::NoSuchFile)? {
-            HandleEntry::File(file) => file.path.clone(),
-            HandleEntry::Dir(dir) => dir.path.clone(),
-        };
-        let metadata = fs::symlink_metadata(path).map_err(map_io_error)?;
+        let metadata = match self.handles.get(&handle).ok_or(StatusCode::NoSuchFile)? {
+            HandleEntry::File(file) => file.file.metadata(),
+            HandleEntry::Dir(dir) => fs::metadata(&dir.path),
+        }
+        .map_err(map_io_error)?;
         Ok(Attrs {
             id,
             attrs: self.attrs_from_metadata(&metadata),
@@ -390,11 +413,15 @@ impl russh_sftp::server::Handler for FsSftpSession {
         handle: String,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        let path = match self.handles.get(&handle).ok_or(StatusCode::NoSuchFile)? {
-            HandleEntry::File(file) => file.path.clone(),
-            HandleEntry::Dir(dir) => dir.path.clone(),
-        };
-        apply_attrs(&path, &attrs)?;
+        match self.handles.get(&handle).ok_or(StatusCode::NoSuchFile)? {
+            HandleEntry::File(file) => {
+                if attrs.size.is_some() && !file.can_write {
+                    return Err(StatusCode::PermissionDenied);
+                }
+                apply_file_attrs(&file.file, &attrs)?;
+            }
+            HandleEntry::Dir(dir) => apply_attrs(&dir.path, &attrs)?,
+        }
         Ok(self.status(id, StatusCode::Ok))
     }
 
@@ -489,23 +516,42 @@ impl russh_sftp::server::Handler for FsSftpSession {
     ) -> Result<Status, Self::Error> {
         let oldpath = self.resolve_path(&oldpath)?;
         let newpath = self.resolve_path(&newpath)?;
-        if let Some(parent) = newpath.parent() {
-            fs::create_dir_all(parent).map_err(map_io_error)?;
-        }
         fs::rename(oldpath, newpath).map_err(map_io_error)?;
         Ok(self.status(id, StatusCode::Ok))
     }
 }
 
 fn apply_attrs(path: &Path, attrs: &FileAttributes) -> Result<(), StatusCode> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(attrs.size.is_some())
+        .open(path)
+        .map_err(map_io_error)?;
+    apply_file_attrs(&file, attrs)
+}
+
+fn apply_file_attrs(file: &fs::File, attrs: &FileAttributes) -> Result<(), StatusCode> {
     if let Some(size) = attrs.size {
-        fs::OpenOptions::new()
-            .write(true)
-            .open(path)
-            .and_then(|file| file.set_len(size))
+        file.set_len(size).map_err(map_io_error)?;
+    }
+    if attrs.atime.is_some() || attrs.mtime.is_some() {
+        let mut times = fs::FileTimes::new();
+        if let Some(atime) = attrs.atime {
+            times = times.set_accessed(UNIX_EPOCH + Duration::from_secs(atime.into()));
+        }
+        if let Some(mtime) = attrs.mtime {
+            times = times.set_modified(UNIX_EPOCH + Duration::from_secs(mtime.into()));
+        }
+        file.set_times(times).map_err(map_io_error)?;
+    }
+    #[cfg(unix)]
+    if let Some(mode) = attrs.permissions {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(mode & 0o7777))
             .map_err(map_io_error)?;
     }
-
+    // In this experiment WASIp2 mode/ownership changes are accepted as no-ops.
+    // File data and timestamps are persisted; POSIX mode preservation is not promised.
     Ok(())
 }
 
@@ -544,10 +590,14 @@ async fn main() -> anyhow::Result<()> {
     let config = russh::server::Config {
         auth_rejection_time: Duration::from_secs(1),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
-        keys: vec![russh::keys::PrivateKey::random(
-            &mut rand::rng(),
-            russh::keys::ssh_key::Algorithm::Ed25519,
-        )?],
+        keys: vec![if let Ok(path) = std::env::var("SFTP_HOST_KEY") {
+            load_or_create_host_key(Path::new(&path))?
+        } else {
+            russh::keys::PrivateKey::random(
+                &mut rand::rng(),
+                russh::keys::ssh_key::Algorithm::Ed25519,
+            )?
+        }],
         ..Default::default()
     };
 
@@ -570,6 +620,35 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn load_or_create_host_key(path: &Path) -> anyhow::Result<russh::keys::PrivateKey> {
+    match fs::metadata(path) {
+        Ok(_) => {
+            return russh::keys::load_secret_key(path, None)
+                .with_context(|| format!("failed to load SFTP_HOST_KEY at {}", path.display()));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let key = russh::keys::PrivateKey::random(
+        &mut rand::rng(),
+        russh::keys::ssh_key::Algorithm::Ed25519,
+    )?;
+    let encoded = key.to_openssh(Default::default())?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("failed to create SFTP_HOST_KEY at {}", path.display()))?;
+    file.write_all(encoded.as_bytes())?;
+    file.sync_all()?;
+    Ok(key)
+}
+
 fn detect_root() -> anyhow::Result<PathBuf> {
     if let Ok(root) = std::env::var("SFTP_FS_ROOT") {
         let trimmed = root.trim();
@@ -585,4 +664,135 @@ fn detect_root() -> anyhow::Result<PathBuf> {
     fs::create_dir_all(&path)
         .with_context(|| format!("failed to create default data dir at {}", path.display()))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh_sftp::server::Handler;
+    struct TempRoot(PathBuf);
+    impl TempRoot {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "sftp-review-{label}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn host_key_is_persistent_and_invalid_key_is_not_replaced() {
+        let root = TempRoot::new("host-key");
+        let path = root.0.join("host_ed25519");
+        let first = load_or_create_host_key(&path).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let second = load_or_create_host_key(&path).unwrap();
+        assert_eq!(first.public_key(), second.public_key());
+        assert_eq!(bytes, fs::read(&path).unwrap());
+        fs::write(&path, b"invalid key").unwrap();
+        assert!(load_or_create_host_key(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"invalid key");
+    }
+
+    #[tokio::test]
+    async fn append_ignores_write_offset() {
+        let root = TempRoot::new("append");
+        fs::write(root.0.join("file"), b"original").unwrap();
+        let mut session = FsSftpSession::new(root.0.clone());
+        let h = session
+            .open(
+                1,
+                "file".into(),
+                OpenFlags::WRITE | OpenFlags::APPEND,
+                FileAttributes::empty(),
+            )
+            .await
+            .unwrap();
+        session
+            .write(2, h.handle, 0, b"NEW".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(fs::read(root.0.join("file")).unwrap(), b"originalNEW");
+    }
+
+    #[tokio::test]
+    async fn open_handle_survives_rename() {
+        let root = TempRoot::new("rename");
+        fs::write(root.0.join("file"), b"original").unwrap();
+        let mut session = FsSftpSession::new(root.0.clone());
+        let h = session
+            .open(1, "file".into(), OpenFlags::READ, FileAttributes::empty())
+            .await
+            .unwrap();
+        session
+            .rename(2, "file".into(), "moved".into())
+            .await
+            .unwrap();
+        fs::write(root.0.join("file"), b"replacement").unwrap();
+        let actual = session.read(3, h.handle, 0, 100).await.unwrap();
+        assert_eq!(actual.data, b"original");
+    }
+
+    #[tokio::test]
+    async fn failed_read_open_does_not_create_directories() {
+        let root = TempRoot::new("read");
+        let mut session = FsSftpSession::new(root.0.clone());
+        assert!(
+            session
+                .open(
+                    1,
+                    "new/sub/missing".into(),
+                    OpenFlags::READ,
+                    FileAttributes::empty()
+                )
+                .await
+                .is_err()
+        );
+        assert!(!root.0.join("new/sub").exists());
+    }
+
+    #[tokio::test]
+    async fn read_only_handle_cannot_truncate() {
+        let root = TempRoot::new("fsetstat");
+        fs::write(root.0.join("file"), b"original").unwrap();
+        let mut session = FsSftpSession::new(root.0.clone());
+        let h = session
+            .open(1, "file".into(), OpenFlags::READ, FileAttributes::empty())
+            .await
+            .unwrap();
+        let mut attrs = FileAttributes::empty();
+        attrs.size = Some(0);
+        assert!(session.fsetstat(2, h.handle, attrs).await.is_err());
+        assert_eq!(fs::read(root.0.join("file")).unwrap(), b"original");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_setstat_updates_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = TempRoot::new("chmod");
+        let path = root.0.join("file");
+        fs::write(&path, b"data").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut session = FsSftpSession::new(root.0.clone());
+        let mut attrs = FileAttributes::empty();
+        attrs.permissions = Some(0o600);
+        let response = session.setstat(1, "file".into(), attrs).await.unwrap();
+        assert_eq!(response.status_code, StatusCode::Ok);
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 }

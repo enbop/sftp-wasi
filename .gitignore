@@ -11,3 +11,12 @@
 *.swp
 *.swo
 *~
+
+# Optional persistent host key generated for local experiments.
+/state/
+
+# Python smoke-test imports.
+__pycache__/
+
+# Local release bundles.
+/dist/
