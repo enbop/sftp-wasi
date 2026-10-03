@@ -59,10 +59,20 @@ jobs:
           tar -xJf wasmtime.tar.xz
           echo "$PWD/wasmtime-v${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
 
-      - name: Smoke test with OpenSSH clients
+      - name: Install OpenSSH and SSHFS
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes openssh-client sshfs fuse3
+          sudo modprobe fuse
+          test -c /dev/fuse
+          test -r /dev/fuse && test -w /dev/fuse
+          ssh -V
+          sshfs --version
+
+      - name: Smoke test with SCP, SFTP and SSHFS
         run: |
           python3 scripts/smoke.py --fungi "$(command -v wasmtime)" \
-            --wasm dist/sftp-wasi/sftp-wasi.wasm --skip-mount
+            --wasm dist/sftp-wasi/sftp-wasi.wasm
 
       - name: Verify bundle checksums
         working-directory: dist/sftp-wasi

@@ -120,9 +120,12 @@ the bundled recipe. The script does not publish a GitHub release or catalog.
 [CI and Release WASM](https://github.com/enbop/sftp-wasi/actions/workflows/release-wasm.yml)
 runs on main pushes, pull requests, and manual dispatches. It checks formatting,
 runs native tests, verifies pinned Git dependencies, builds the WASIp2 component,
-and exercises it with real OpenSSH scp/SFTP clients on Wasmtime 46.0.1.
-CI explicitly skips SSHFS mounts and Fungi daemon integration; run the local
-recipe smoke test above for those checks.
+and exercises it with real OpenSSH scp/SFTP clients and SSHFS mounts on Wasmtime
+46.0.1. The Ubuntu runner installs SSHFS/FUSE and requires working mount support;
+mount failures fail CI rather than skipping the checks. Tests cover mounted
+read/write, append, random writes, truncate, open handles across rename,
+editor-style replacement, unmount/remount, and component restart alongside SCP
+transfers. Fungi daemon integration remains in the local recipe smoke test above.
 
 To publish, set the version in Cargo.toml, update Cargo.lock, commit, then push a
 matching tag (for example, `v0.1.0` for version `0.1.0`). A mismatched tag fails
