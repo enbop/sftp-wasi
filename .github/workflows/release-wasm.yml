@@ -1,0 +1,117 @@
+name: CI and Release WASM
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  WASMTIME_VERSION: "46.0.1"
+
+jobs:
+  build:
+    name: Test and build WASIp2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import tomllib
+          from pathlib import Path
+          version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+          tag = os.environ["GITHUB_REF_NAME"]
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag {tag!r} must match Cargo.toml version v{version}")
+          PYTHON
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip2
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build and package WASIp2
+        run: python3 scripts/package-release.py --output dist/sftp-wasi
+
+      - name: Install Wasmtime
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --location --silent --show-error \
+            --output wasmtime.tar.xz \
+            "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasmtime-v${WASMTIME_VERSION}-x86_64-linux.tar.xz"
+          tar -xJf wasmtime.tar.xz
+          echo "$PWD/wasmtime-v${WASMTIME_VERSION}-x86_64-linux" >> "$GITHUB_PATH"
+
+      - name: Smoke test with OpenSSH clients
+        run: |
+          python3 scripts/smoke.py --fungi "$(command -v wasmtime)" \
+            --wasm dist/sftp-wasi/sftp-wasi.wasm --skip-mount
+
+      - name: Verify bundle checksums
+        working-directory: dist/sftp-wasi
+        run: sha256sum -c SHA256SUMS
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p dist/release-assets
+          cp dist/sftp-wasi/sftp-wasi.wasm dist/sftp-wasi.tar.gz dist/release-assets/
+          cd dist/release-assets
+          sha256sum sftp-wasi.wasm > sftp-wasi.wasm.sha256
+          sha256sum sftp-wasi.tar.gz > sftp-wasi.tar.gz.sha256
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sftp-wasi-wasm
+          path: dist/release-assets/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified assets
+        uses: actions/download-artifact@v4
+        with:
+          name: sftp-wasi-wasm
+          path: release-assets
+
+      - name: Verify downloaded assets
+        working-directory: release-assets
+        run: |
+          sha256sum -c sftp-wasi.wasm.sha256
+          sha256sum -c sftp-wasi.tar.gz.sha256
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            release-assets/sftp-wasi.wasm
+            release-assets/sftp-wasi.wasm.sha256
+            release-assets/sftp-wasi.tar.gz
+            release-assets/sftp-wasi.tar.gz.sha256

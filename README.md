@@ -115,6 +115,42 @@ The bundle includes WASM, a colocated recipe, SHA256SUMS, build provenance and
 source archive. Verify `sha256sum -c SHA256SUMS` after extraction, then apply
 the bundled recipe. The script does not publish a GitHub release or catalog.
 
+## CI and GitHub releases
+
+[CI and Release WASM](https://github.com/enbop/sftp-wasi/actions/workflows/release-wasm.yml)
+runs on main pushes, pull requests, and manual dispatches. It checks formatting,
+runs native tests, verifies pinned Git dependencies, builds the WASIp2 component,
+and exercises it with real OpenSSH scp/SFTP clients on Wasmtime 46.0.1.
+CI explicitly skips SSHFS mounts and Fungi daemon integration; run the local
+recipe smoke test above for those checks.
+
+To publish, set the version in Cargo.toml, update Cargo.lock, commit, then push a
+matching tag (for example, `v0.1.0` for version `0.1.0`). A mismatched tag fails
+before building. Tag pushes publish a GitHub Release only after all checks pass;
+manual dispatches only upload workflow artifacts. Tags with a prerelease suffix
+such as `v0.1.0-rc.1` produce a prerelease and must also match Cargo.toml.
+
+Release assets follow the other Fungi services:
+
+- `sftp-wasi.wasm` and `sftp-wasi.wasm.sha256` for version-pinned recipe URLs:
+  `https://github.com/enbop/sftp-wasi/releases/download/<tag>/sftp-wasi.wasm`.
+- `sftp-wasi.tar.gz` and `sftp-wasi.tar.gz.sha256` for a ready-to-apply local
+  bundle with its recipe, source archive, build provenance and inner checksums.
+
+Download both the bundle and its checksum from the same release, then:
+
+```sh
+sha256sum -c sftp-wasi.tar.gz.sha256
+tar -xzf sftp-wasi.tar.gz
+cd sftp-wasi
+sha256sum -c SHA256SUMS
+fungi service apply sftp-demo ./sftp-wasi.fungi.md --dry-run
+fungi service apply sftp-demo ./sftp-wasi.fungi.md --start
+```
+
+A compatible Fungi daemon is still required. Publishing this component does not
+add it to the official recipe catalog.
+
 ## Experimental limits
 
 - Modern scp's SFTP transport only: no legacy `scp -O`, remote shell/exec or
